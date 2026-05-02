@@ -4,3 +4,5 @@ requests
 beautifulsoup4
 google-generativeai
 plotly
+gspread
+st-gsheets-connection
