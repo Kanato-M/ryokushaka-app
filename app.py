@@ -11,6 +11,11 @@ from streamlit_gsheets import GSheetsConnection
 # --- ページ設定 ---
 st.set_page_config(page_title="緑黄色社会 ライブ＆楽曲管理アプリ", page_icon="🥦", layout="wide")
 
+# 合言葉が一致しない場合はここでストップ
+if st.text_input("合言葉を入力してください", type="password") != "ryokushaka_broccoli":
+    st.warning("正しい合言葉を入力してください。")
+    st.stop()
+
 # --- 定数設定 ---
 CSV_LIVES = "LiveList.csv"
 CSV_SONGS = "SongList.csv"
