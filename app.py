@@ -6,6 +6,7 @@ import time
 import os
 import google.generativeai as genai
 import plotly.express as px
+from streamlit_gsheets import GSheetsConnection
 
 # --- ページ設定 ---
 st.set_page_config(page_title="緑黄色社会 ライブ＆楽曲管理アプリ", page_icon="🥦", layout="wide")
@@ -14,7 +15,9 @@ st.set_page_config(page_title="緑黄色社会 ライブ＆楽曲管理アプリ
 CSV_LIVES = "LiveList.csv"
 CSV_SONGS = "SongList.csv"
 CSV_SETLISTS = "Setlists.csv"
-CSV_MYLIVES = "mylive.csv"
+
+# ★ご自身のスプレッドシートのURLに書き換えてください！
+SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1tEjyQxAvhHPctnBedRIlYn3tUPissujas3i7Te8Yp2U/edit"
 
 # 取得用URL（before=過去, after=未来）
 URL_PAST = "https://www.livefans.jp/search/artist/25704/page:{page}?&setlist=1&year=before&sort=e1"
@@ -88,14 +91,26 @@ def load_data():
 
     return df_songs, df_lives, df_setlists
 
+# ★マイ参戦記録の読み書き関数をスプレッドシート用に変更
 def load_mylives():
     try:
-        return pd.read_csv(CSV_MYLIVES)['表示名'].tolist()
-    except FileNotFoundError:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        df_my = conn.read(spreadsheet=SPREADSHEET_URL, usecols=[0])
+        if not df_my.empty and '表示名' in df_my.columns:
+            return df_my['表示名'].dropna().tolist()
+        return []
+    except Exception as e:
+        st.error(f"スプレッドシートの読み込みエラー: {e}")
         return []
 
 def save_mylives(mylive_list):
-    pd.DataFrame({'表示名': mylive_list}).to_csv(CSV_MYLIVES, index=False)
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        df_update = pd.DataFrame({'表示名': mylive_list})
+        conn.update(spreadsheet=SPREADSHEET_URL, data=df_update)
+        st.cache_data.clear() # キャッシュをクリアして最新を読み込ませる
+    except Exception as e:
+        st.error(f"スプレッドシートの保存エラー: {e}")
 
 df_songs, df_lives, df_setlists = load_data()
 
@@ -303,14 +318,19 @@ if menu == "🏠 ホーム":
             
             if not yearly_counts.empty:
                 yearly_counts.index = yearly_counts.index.astype(int).astype(str)
-                st.bar_chart(yearly_counts)
+                # 修正前：st.bar_chart(yearly_counts) を以下に差し替え
+                fig_bar = px.bar(x=yearly_counts.index, y=yearly_counts.values, labels={'x': '年', 'y': '参戦回数'})
+                fig_bar.update_layout(xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True), margin=dict(l=0, r=0, t=10, b=0), height=250)
+                st.plotly_chart(fig_bar, use_container_width=True, config={'displayModeBar': False})
 
             st.subheader("🎧 現地でよく聴いた曲 Top5")
             song_counts = my_heard_songs_df['曲名'].value_counts().head(5).reset_index()
             song_counts.columns = ['曲名', '回数']
             fig_top_songs = px.bar(song_counts, x='回数', y='曲名', orientation='h', text='回数')
             fig_top_songs.update_layout(yaxis={'categoryorder':'total ascending'}, margin=dict(l=0, r=0, t=0, b=0), height=250)
-            st.plotly_chart(fig_top_songs, use_container_width=True)
+            # 修正前：st.plotly_chart(fig_top_songs, use_container_width=True) を以下に差し替え
+            fig_top_songs.update_layout(xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True))
+            st.plotly_chart(fig_top_songs, use_container_width=True, config={'displayModeBar': False})
 
         with g_col2:
             st.subheader("💎 回収済み楽曲のレアリティ構成")
@@ -335,7 +355,9 @@ if menu == "🏠 ホーム":
                 )
                 fig_rarity.update_traces(textposition='inside', textinfo='percent+label+value')
                 fig_rarity.update_layout(margin=dict(l=20, r=20, t=20, b=20), height=350)
-                st.plotly_chart(fig_rarity, use_container_width=True)
+                # 修正前：st.plotly_chart(fig_rarity, use_container_width=True) を以下に差し替え
+                fig_rarity.update_layout(dragmode=False) # 円グラフの回転やズームを禁止
+                st.plotly_chart(fig_rarity, use_container_width=True, config={'displayModeBar': False})
                 
                 st.write("※公式リリース楽曲のみを集計しています。")
     else:
@@ -432,7 +454,10 @@ elif menu == "🔍 楽曲からライブを探す":
                     yearly_counts = yearly_counts.reindex(all_years, fill_value=0)
                     yearly_counts.index = yearly_counts.index.astype(str)
                     
-                    st.line_chart(yearly_counts)
+                    # 修正前：st.line_chart(yearly_counts) を以下に差し替え
+                    fig_line = px.line(x=yearly_counts.index, y=yearly_counts.values, markers=True, labels={'x': '年', 'y': '披露回数'})
+                    fig_line.update_layout(xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True, rangemode='tozero'), margin=dict(l=0, r=0, t=10, b=0), height=300)
+                    st.plotly_chart(fig_line, use_container_width=True, config={'displayModeBar': False})
     else:
         st.info("データがありません。「🎸 ライブ・フェス情報」から取得してください。")
 
@@ -472,7 +497,8 @@ elif menu == "📝 各ライブのセットリスト":
                         hole=0.4
                     )
                     fig.update_traces(textposition='inside', textinfo='percent+label')
-                    st.plotly_chart(fig, use_container_width=True)
+                    fig.update_layout(dragmode=False) # 円グラフの回転やズームを禁止
+                    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
                     st.markdown(RARITY_EXPLANATION, unsafe_allow_html=True)
             else:
