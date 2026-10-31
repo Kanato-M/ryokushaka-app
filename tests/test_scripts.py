@@ -149,7 +149,6 @@ class BuildTest(unittest.TestCase):
             ["https://www.livefans.jp/events/2", "2", "Mela!"],
             ["https://www.livefans.jp/events/2", "3", "他の人の曲2"],
         ])
-        self.write("mylive.csv", ["表示名"], [["2024/01/01 | 緑黄色社会 ツアー @ A"]])
 
         with mock.patch.object(build_data, "DATA_DIR", self.tmp):
             data = build_data.build()
@@ -159,7 +158,7 @@ class BuildTest(unittest.TestCase):
                          "表記ゆれ統一・MC除外・重複除外・カバー曲は残す")
         self.assertEqual(data["setlists"]["2"], ["Mela!"], "TV 番組は緑黄色社会の曲だけ残す")
         self.assertEqual({l["id"]: l["type"] for l in data["lives"]}, {"1": "oneman", "2": "tv"})
-        self.assertEqual(data["seedMyLives"], ["2024/01/01 | 緑黄色社会 ツアー @ A"])
+        self.assertNotIn("seedMyLives", data, "個人の参戦記録を公開データに含めない")
 
     def test_real_data_builds(self):
         data = build_data.build()

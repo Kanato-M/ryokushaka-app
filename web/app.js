@@ -29,7 +29,6 @@ const LS = {
   my: 'rln.myLives.v1',
   extra: 'rln.myExtra.v1',
   settings: 'rln.settings.v1',
-  seeded: 'rln.seeded.v1',
   pending: 'rln.syncPending.v1',
   chat: 'rln.chat.v1',
 };
@@ -1295,13 +1294,8 @@ async function init() {
 
   const localMy = loadJSON(LS.my, null);
   S.myExtra = loadJSON(LS.extra, []);
-  if (localMy) {
-    S.my = new Set(localMy.filter((id) => S.liveById.has(id)));
-  } else if (!Sync.configured() && !loadJSON(LS.seeded, false) && (data.seedMyLives || []).length) {
-    // 初回のみ、リポジトリの data/mylive.csv を初期値として取り込む
-    applyRemoteItems(data.seedMyLives.map((n) => ({ 表示名: n })));
-    saveJSON(LS.seeded, true);
-  }
+  // 参戦記録は各自のブラウザに保存（アプリを共有しても他の人の記録は空の状態から始まる）
+  if (localMy) S.my = new Set(localMy.filter((id) => S.liveById.has(id)));
 
   render();
 
