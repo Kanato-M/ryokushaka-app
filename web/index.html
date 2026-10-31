@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>リョクシャカ LIVE NOTE</title>
+  <meta name="description" content="緑黄色社会のライブ・セットリスト・楽曲披露回数・レアリティと、自分の参戦記録をまとめるアプリ">
+  <meta name="theme-color" content="#2e9d5b">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="LIVE NOTE">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">
+      <img src="icon.svg" alt="" width="28" height="28">
+      <span>リョクシャカ <b>LIVE NOTE</b></span>
+    </a>
+    <div class="topbar-right">
+      <span id="sync-status" class="sync-status" hidden></span>
+      <a href="#/settings" class="icon-btn" aria-label="設定" title="設定">
+        <span aria-hidden="true">⚙️</span>
+      </a>
+    </div>
+  </header>
+
+  <nav class="tabbar" aria-label="メインメニュー">
+    <a href="#/" data-tab="home"><span class="ti">🏠</span><span>ホーム</span></a>
+    <a href="#/lives" data-tab="lives"><span class="ti">🎸</span><span>ライブ</span></a>
+    <a href="#/songs" data-tab="songs"><span class="ti">💿</span><span>楽曲</span></a>
+    <a href="#/my" data-tab="my"><span class="ti">🎫</span><span>マイ参戦</span></a>
+    <a href="#/ai" data-tab="ai"><span class="ti">🤖</span><span>AI</span></a>
+  </nav>
+
+  <main id="view" class="view" tabindex="-1">
+    <div class="loading"><div class="spinner"></div><p>データを読み込み中...</p></div>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

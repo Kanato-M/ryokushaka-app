@@ -1,0 +1,82 @@
+name: データ更新 & デプロイ
+
+on:
+  schedule:
+    # 毎日 3:17 と 15:17（日本時間）に LiveFans から最新情報を取得
+    - cron: "17 18 * * *"
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "過去の公演一覧を最後のページまでたどり直す"
+        type: boolean
+        default: false
+      retry_all:
+        description: "セトリ未取得の過去公演をすべて再取得する"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: update-and-deploy
+  cancel-in-progress: false
+
+jobs:
+  update:
+    # main への push 時はデータ取得をせず、デプロイだけ行う
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: LiveFans から取得
+        run: |
+          ARGS=""
+          if [ "${{ inputs.full }}" = "true" ]; then ARGS="$ARGS --full"; fi
+          if [ "${{ inputs.retry_all }}" = "true" ]; then ARGS="$ARGS --retry-all"; fi
+          python scripts/update_data.py $ARGS
+      - name: 変更をコミット
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          if git diff --cached --quiet; then
+            echo "データに変更はありませんでした"
+          else
+            git commit -m "データ自動更新 ($(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M'))"
+            git push
+          fi
+
+  deploy:
+    needs: update
+    # 取得に失敗しても既存データでデプロイは続行する
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}   # update ジョブがコミットした最新データを取得
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: data.json を生成
+        run: python scripts/build_data.py
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+      - id: deployment
+        uses: actions/deploy-pages@v4

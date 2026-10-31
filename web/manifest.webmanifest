@@ -1,0 +1,16 @@
+{
+  "name": "リョクシャカ LIVE NOTE",
+  "short_name": "LIVE NOTE",
+  "description": "緑黄色社会のライブ・セットリスト・楽曲レアリティと参戦記録",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f7f2",
+  "theme_color": "#2e9d5b",
+  "lang": "ja",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
