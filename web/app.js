@@ -8,7 +8,42 @@
  * ================================================================ */
 const REPO_URL = 'https://github.com/Kanato-M/ryokushaka-app';
 const WORKFLOW_URL = REPO_URL + '/actions/workflows/update-and-deploy.yml';
-const DEFAULT_MODEL = 'gemini-flash-latest';
+
+/* AI プロバイダー（API キーは各自のブラウザにのみ保存し、ブラウザから直接各社の API を呼び出す） */
+const AI_PROVIDERS = {
+  claude: {
+    label: 'Claude（Anthropic）',
+    short: 'Claude',
+    defaultModel: 'claude-opus-5-5',
+    keyPlaceholder: 'sk-ant-...',
+    keyUrl: 'https://platform.claude.com/settings/keys',
+    keyUrlLabel: 'Claude Console で API キーを取得',
+    modelNote: '既定は <code>claude-opus-5-5</code>（Claude Opus 5.5）。料金を抑えたい場合は <code>claude-sonnet-5-5</code> や <code>claude-haiku-5-5</code> も指定できます。',
+  },
+  gemini: {
+    label: 'Gemini（Google）',
+    short: 'Gemini',
+    defaultModel: 'gemini-flash-latest',
+    keyPlaceholder: 'AIza...',
+    keyUrl: 'https://aistudio.google.com/apikey',
+    keyUrlLabel: 'Google AI Studio で API キーを取得（無料枠あり）',
+    modelNote: '既定は <code>gemini-flash-latest</code>（常に最新の Flash）。',
+  },
+  openai: {
+    label: 'その他（OpenAI 互換 API）',
+    short: 'カスタム AI',
+    defaultModel: '',
+    keyPlaceholder: 'API キー',
+    keyUrl: '',
+    keyUrlLabel: '',
+    modelNote: 'OpenAI・OpenRouter・Groq など、<code>/chat/completions</code> 形式の API に対応。ベース URL とモデル名はサービスの説明に従って入力してください。',
+  },
+};
+// 旧バージョン（Gemini のみ）の設定を引き継ぐ: Gemini のキーだけがある場合は Gemini を使う
+const aiProvider = () => S.settings.aiProvider || (S.settings.geminiKey && !S.settings.claudeKey ? 'gemini' : 'claude');
+const aiKey = (p = aiProvider()) => (S.settings[`${p}Key`] || '').trim();
+const aiModel = (p = aiProvider()) => (S.settings[`${p}Model`] || AI_PROVIDERS[p].defaultModel || '').trim();
+const aiReady = (p = aiProvider()) => !!aiKey(p) && !!aiModel(p) && (p !== 'openai' || !!(S.settings.openaiBase || '').trim());
 
 const RARITY = {
   NEVER: { label: '未披露', color: '#5f6b64', order: 0, desc: '公式曲リストにあるが、ライブでの披露記録がない曲' },
@@ -818,7 +853,137 @@ function updateSuggest() {
 }
 
 /* ================================================================
- * 画面: AI アシスタント（Google Gemini）
+ * 画面: セットリストガチャ
+ * ================================================================ */
+const GACHA_MODES = {
+  real: { label: '🎯 リアル', desc: '直近2年の披露率どおりに抽選。新曲や定番曲が出やすく、本物のセトリっぽくなります' },
+  rare: { label: '💎 レア狙い', desc: 'レア度が高い曲ほど出やすい。UR・SSR が続々登場する夢のセトリ' },
+  random: { label: '🎲 ランダム', desc: '全曲が同じ確率。何が出るかわからない運試し' },
+};
+const RARE_WEIGHT = { NEVER: 10, UR: 12, SSR: 8, SR: 6, RR: 4, R: 2.5, UC: 1.5, C: 1 };
+const GACHA_POINT = { NEVER: 12, UR: 10, SSR: 6, SR: 4, RR: 3, R: 2, UC: 1, C: 0.5 };
+const LS_GACHA_BEST = 'rln.gachaBest.v1';
+
+let posCache = null;
+/** 各曲がセトリのどのあたりで演奏されることが多いか（0=1曲目 〜 1=最後）。ワンマン・FC・フェスの過去公演から集計 */
+function songPositions() {
+  if (posCache && posCache.data === S.data) return posCache.map;
+  const acc = new Map();
+  for (const l of S.lives) {
+    if (l.type === 'tv' || !isPast(l)) continue;
+    const sl = S.data.setlists[l.id];
+    if (!sl || sl.length < 5) continue;
+    sl.forEach((t, i) => {
+      const a = acc.get(t) || { sum: 0, n: 0 };
+      a.sum += i / (sl.length - 1);
+      a.n++;
+      acc.set(t, a);
+    });
+  }
+  const map = new Map([...acc].map(([t, a]) => [t, a.sum / a.n]));
+  posCache = { data: S.data, map };
+  return map;
+}
+
+function gachaWeight(st, mode, preferUnheard, heard) {
+  let w;
+  if (mode === 'random') w = 1;
+  else if (mode === 'rare') w = RARE_WEIGHT[st.rarity] || 1;
+  else {
+    w = 0.5 + st.rate2y; // 披露率（%）がそのまま出やすさに
+    const rel = S.songByTitle.get(st.title)?.release;
+    if (rel && daysUntil(rel) > -365) w += 60; // リリース1年以内の新曲はツアーで披露されやすい
+  }
+  if (preferUnheard && !heard.has(st.title)) w *= 3;
+  return w;
+}
+
+/** 重み付きで重複なしに count 曲を抽選し、過去の演奏位置をもとに並べる */
+function drawGacha({ mode, count, preferUnheard }) {
+  const { map: heard } = heardSongs();
+  const pool = S.songs.map((s) => S.stats.get(s.title)).map((st) => ({ st, w: gachaWeight(st, mode, preferUnheard, heard) }));
+  const picked = [];
+  const rand = () => crypto.getRandomValues(new Uint32Array(1))[0] / 2 ** 32;
+  while (picked.length < count && pool.length) {
+    const total = pool.reduce((a, x) => a + x.w, 0);
+    let r = rand() * total;
+    let i = 0;
+    while (i < pool.length - 1 && (r -= pool[i].w) > 0) i++;
+    picked.push(pool.splice(i, 1)[0].st);
+  }
+  const pos = songPositions();
+  const ordered = picked
+    .map((st) => ({ st, key: (pos.get(st.title) ?? 0.5) + (rand() - 0.5) * 0.3 }))
+    .sort((a, b) => a.key - b.key)
+    .map((x) => x.st.title);
+  const score = ordered.reduce((a, t) => a + (GACHA_POINT[rarityOf(t)] || 0), 0);
+  return { mode, count, preferUnheard, titles: ordered, score: Math.round(score * 10) / 10, encore: count >= 12 ? 3 : 0, at: Date.now() };
+}
+
+function gachaText(g) {
+  const lines = [`🎰 リョクシャカ セトリガチャ（${GACHA_MODES[g.mode].label.replace(/^\S+\s/, '')}）`];
+  g.titles.forEach((t, i) => {
+    if (g.encore && i === g.titles.length - g.encore) lines.push('― ENCORE ―');
+    lines.push(`${i + 1}. ${t} [${RARITY[rarityOf(t)].label}]`);
+  });
+  lines.push(`ガチャスコア: ${g.score}`);
+  return lines.join('\n');
+}
+
+function renderGachaResult() {
+  const box = $('#gacha-result');
+  const g = S.ui.gacha;
+  if (!box) return;
+  if (!g) {
+    box.innerHTML = '<section class="card"><p class="empty">🎰 ボタンを押してガチャを回そう！<br>過去の披露データとレア度をもとに、セットリストをランダムで作ります。</p></section>';
+    return;
+  }
+  const { map: heard } = heardSongs();
+  const counts = new Map();
+  for (const t of g.titles) inc(counts, rarityOf(t));
+  const order = Object.keys(RARITY).sort((a, b) => RARITY[a].order - RARITY[b].order);
+  const top = order.find((k) => counts.get(k));
+  const best = loadJSON(LS_GACHA_BEST, 0);
+  const headline = { UR: '🌈 UR 降臨！激レアセトリ！', NEVER: '🌈 未披露曲が登場！？伝説のセトリ！', SSR: '✨ SSR 登場！', SR: '⭐ SR 入り！', RR: '🎵 なかなかのセトリ', R: '🎵 定番寄りのセトリ', UC: '🎵 王道セトリ', C: '🎵 王道セトリ' }[top] || '';
+  const unheardCount = g.titles.filter((t) => !heard.has(t)).length;
+  box.innerHTML = `<section class="card gacha-head ${top === 'UR' || top === 'NEVER' ? 'rainbow' : ''}">
+      <div class="gacha-headline">${headline}</div>
+      <div class="gacha-score">ガチャスコア <b>${g.score}</b>${g.score >= best && g.score > 0 ? ' <span class="tag go">自己ベスト！</span>' : ` <small class="muted">（自己ベスト ${best}）</small>`}</div>
+      <div class="chips" style="flex-wrap:wrap;margin:8px 0 0">${order.filter((k) => counts.get(k)).map((k) => `<span class="chip" style="cursor:default">${badge(k)} × ${counts.get(k)}</span>`).join('')}</div>
+      ${heard.size ? `<p class="note">まだ現地で聴いていない曲: ${unheardCount} 曲</p>` : ''}
+    </section>
+    <section class="card flush">
+      <ol class="setlist gacha-list">${g.titles.map((t, i) => {
+        const r = rarityOf(t);
+        const enc = g.encore && i === g.titles.length - g.encore ? '<li class="encore-sep">― ENCORE ―</li>' : '';
+        return `${enc}<li class="gacha-item r-${r}" style="animation-delay:${i * 70}ms"><a href="${songHref(t)}"><span class="no">${i + 1}</span>${badge(r)}<span class="name">${esc(t)}</span>${heard.size && !heard.has(t) ? '<span class="tag go">未回収</span>' : ''}</a></li>`;
+      }).join('')}</ol>
+    </section>
+    <div class="btn-row" style="margin-bottom:14px">
+      <button class="btn" data-act="gacha-share">📋 結果をコピー・共有</button>
+      <button class="btn" data-act="gacha-ai">🤖 AI に講評してもらう</button>
+    </div>`;
+}
+
+function renderGacha() {
+  const u = S.ui;
+  u.gachaMode = u.gachaMode || 'real';
+  u.gachaCount = u.gachaCount || 18;
+  setTimeout(renderGachaResult);
+  return pageHead('セトリガチャ', '過去の披露曲とレア度をもとに、ランダムでセットリストを作ります')
+    + `<section class="card">
+        <div class="seg full" role="tablist">${Object.entries(GACHA_MODES).map(([k, m]) => `<button class="${u.gachaMode === k ? 'on' : ''}" data-act="gacha-mode" data-v="${k}">${m.label}</button>`).join('')}</div>
+        <p class="small muted" style="margin:0 0 10px">${GACHA_MODES[u.gachaMode].desc}</p>
+        <label class="field"><span>曲数: <b id="gacha-count-label">${u.gachaCount}</b> 曲</span><input type="range" id="gacha-count" min="5" max="25" value="${u.gachaCount}" style="width:100%"></label>
+        <label class="small" style="display:flex;gap:8px;align-items:center;margin-bottom:12px"><input type="checkbox" id="gacha-unheard" ${u.gachaUnheard ? 'checked' : ''}> まだ現地で聴いていない曲を出やすくする</label>
+        <button class="btn primary block gacha-btn" data-act="gacha-draw">🎰 ガチャを回す</button>
+      </section>
+      <div id="gacha-result"></div>
+      <section class="card">${rarityExplain()}<p class="note">曲順は、各曲が過去のライブで何曲目あたりに演奏されることが多いかをもとに並べています。12 曲以上の場合は最後の 3 曲をアンコールとして表示します。</p></section>`;
+}
+
+/* ================================================================
+ * 画面: AI アシスタント（Claude / Gemini / OpenAI 互換）
  * ================================================================ */
 let chatHistory = (() => { try { return JSON.parse(sessionStorage.getItem(LS.chat)) || []; } catch { return []; } })();
 let chatBusy = false;
@@ -867,22 +1032,89 @@ function buildAIContext() {
   ].join('\n');
 }
 
-async function askGemini() {
-  const key = S.settings.geminiKey;
-  const model = (S.settings.geminiModel || DEFAULT_MODEL).trim();
-  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+/** 会話履歴を選択中の AI に送り、回答テキストを返す */
+async function askAI() {
+  const provider = aiProvider();
+  const system = buildAIContext();
+  const history = chatHistory.filter((m) => m.role !== 'error');
+  if (provider === 'claude') return askClaude(system, history);
+  if (provider === 'gemini') return askGemini(system, history);
+  return askOpenAICompatible(system, history);
+}
+
+async function readJSON(res) {
+  return res.json().catch(() => ({}));
+}
+
+// Claude Messages API（ブラウザから直接呼び出す）
+// 公式 SDK はビルド環境のないこの静的サイトでは使えないため、HTTP で呼び出す
+const CLAUDE_FALLBACK_MODELS = ['claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-fable-5-1'];
+async function askClaude(system, history) {
+  const model = aiModel('claude');
+  const headers = {
+    'Content-Type': 'application/json',
+    'x-api-key': aiKey('claude'),
+    'anthropic-version': '2026-10-21',
+    'anthropic-dangerous-direct-browser-access': 'true',
+  };
+  const body = {
+    model,
+    max_tokens: 16000,
+    cache_control: { type: 'ephemeral' }, // 毎回同じデータ（system）を送るのでキャッシュして料金を抑える
+    system,
+    messages: history.map((m) => ({ role: m.role === 'model' ? 'assistant' : 'user', content: m.text })),
+  };
+  // 安全フィルターで断られた場合に別モデルで自動的に再実行する（対応モデルのみ）
+  if (CLAUDE_FALLBACK_MODELS.includes(model)) {
+    headers['anthropic-beta'] = 'server-side-fallback-2026-07-01';
+    body.fallbacks = 'default';
+  }
+  const res = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body: JSON.stringify(body) });
+  const json = await readJSON(res);
+  if (!res.ok) {
+    const type = json.error?.type;
+    const hint = { authentication_error: '（API キーが正しくありません）', not_found_error: '（モデル名を確認してください）', rate_limit_error: '（利用上限に達しました。少し待ってから再度お試しください）', overloaded_error: '（混み合っています。少し待ってから再度お試しください）', billing_error: '（Claude Console でクレジット残高を確認してください）' }[type] || '';
+    throw new Error(`${json.error?.message || `HTTP ${res.status}`}${hint}`);
+  }
+  if (json.stop_reason === 'refusal') throw new Error('この質問には回答できませんでした。質問の仕方を変えてお試しください。');
+  const text = (json.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+  if (!text) throw new Error(`回答が空でした（${json.stop_reason || '理由不明'}）`);
+  return json.stop_reason === 'max_tokens' ? `${text}\n\n（回答が長すぎるため途中で終了しました）` : text;
+}
+
+// Google Gemini API
+async function askGemini(system, history) {
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(aiModel('gemini'))}:generateContent`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': aiKey('gemini') },
     body: JSON.stringify({
-      systemInstruction: { parts: [{ text: buildAIContext() }] },
-      contents: chatHistory.filter((m) => m.role !== 'error').map((m) => ({ role: m.role, parts: [{ text: m.text }] })),
+      systemInstruction: { parts: [{ text: system }] },
+      contents: history.map((m) => ({ role: m.role === 'model' ? 'model' : 'user', parts: [{ text: m.text }] })),
     }),
   });
-  const json = await res.json().catch(() => ({}));
+  const json = await readJSON(res);
   if (!res.ok) throw new Error(json.error?.message || `HTTP ${res.status}`);
   const cand = json.candidates?.[0];
   const text = (cand?.content?.parts || []).map((p) => p.text || '').join('').trim();
   if (!text) throw new Error(`回答が空でした（${cand?.finishReason || json.promptFeedback?.blockReason || '理由不明'}）`);
+  return text;
+}
+
+// OpenAI 互換の Chat Completions API（OpenAI / OpenRouter / Groq など）
+async function askOpenAICompatible(system, history) {
+  const base = (S.settings.openaiBase || '').trim().replace(/\/+$/, '');
+  const res = await fetch(`${base}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${aiKey('openai')}` },
+    body: JSON.stringify({
+      model: aiModel('openai'),
+      messages: [{ role: 'system', content: system }, ...history.map((m) => ({ role: m.role === 'model' ? 'assistant' : 'user', content: m.text }))],
+    }),
+  });
+  const json = await readJSON(res);
+  if (!res.ok) throw new Error(json.error?.message || json.message || `HTTP ${res.status}`);
+  const text = (json.choices?.[0]?.message?.content || '').trim();
+  if (!text) throw new Error(`回答が空でした（${json.choices?.[0]?.finish_reason || '理由不明'}）`);
   return text;
 }
 
@@ -923,13 +1155,13 @@ function renderChat() {
 async function sendChat(text) {
   text = (text || '').trim();
   if (!text || chatBusy) return;
-  if (!S.settings.geminiKey) { toast('先に Gemini API キーを設定してください'); return; }
+  if (!aiReady()) { toast('先に AI の API キーを設定してください'); return; }
   chatHistory = chatHistory.filter((m) => m.role !== 'error');
   chatHistory.push({ role: 'user', text });
   chatBusy = true;
   renderChat();
   try {
-    const answer = await askGemini();
+    const answer = await askAI();
     chatHistory.push({ role: 'model', text: answer });
   } catch (e) {
     chatHistory.pop();
@@ -943,16 +1175,27 @@ async function sendChat(text) {
   }
 }
 
+function aiProviderSelect(id, current) {
+  return `<select class="input" id="${id}" aria-label="使う AI">${Object.entries(AI_PROVIDERS).map(([k, v]) => `<option value="${k}" ${k === current ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}</select>`;
+}
+
 function renderAI() {
-  const hasKey = !!S.settings.geminiKey;
+  const provider = aiProvider();
+  const P = AI_PROVIDERS[provider];
+  const ready = aiReady();
   setTimeout(renderChat);
-  return pageHead('AI アシスタント', 'Google Gemini がこのアプリのデータを元にセトリ予想や質問に答えます',
+  return pageHead('AI アシスタント', 'このアプリのデータ（セトリ・披露率など）を AI に渡して、セトリ予想や質問に答えてもらいます',
     chatHistory.length ? '<button class="btn small" data-act="chat-clear">会話をリセット</button>' : '')
-    + (hasKey ? '' : `<section class="card">
-        <h2>🔑 Gemini API キーを設定してください</h2>
-        <p class="small muted">Google AI Studio で無料の API キーを取得できます。キーはこの端末のブラウザ内にのみ保存されます。</p>
-        <div class="btn-row"><input class="input" type="password" id="ai-key-inline" placeholder="API キーを貼り付け" style="flex:1"><button class="btn primary" data-act="save-key-inline">保存</button></div>
-        <p class="note"><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">API キーを取得する ↗</a></p>
+    + (ready
+      ? `<p class="small muted">使用中: <b>${esc(P.short)}</b>（${esc(aiModel())}） ・ <a href="#/settings">変更</a></p>`
+      : `<section class="card">
+        <h2>🔑 使う AI と API キーを設定してください</h2>
+        <p class="small muted">API キーはこの端末のブラウザ内にのみ保存され、選んだ AI の会社にだけ送信されます。</p>
+        <label class="field"><span>使う AI</span>${aiProviderSelect('ai-provider-inline', provider)}</label>
+        ${provider === 'openai'
+          ? `<p class="small">OpenAI 互換 API はベース URL・モデル名の入力が必要です。<a href="#/settings">設定画面</a>から設定してください。</p>`
+          : `<div class="btn-row"><input class="input" type="password" id="ai-key-inline" placeholder="${esc(P.keyPlaceholder)}" style="flex:1"><button class="btn primary" data-act="save-key-inline">保存</button></div>
+            <p class="note"><a href="${P.keyUrl}" target="_blank" rel="noopener">${esc(P.keyUrlLabel)} ↗</a></p>`}
       </section>`)
     + `<section class="card">
         <div class="chips" style="flex-wrap:wrap">${AI_PRESETS.map(([label], i) => `<button class="chip" data-act="ai-preset" data-i="${i}">${label}</button>`).join('')}</div>
@@ -998,11 +1241,16 @@ function renderSettings() {
       </section>
 
       <section class="card">
-        <h2>🤖 AI アシスタント（Google Gemini）</h2>
-        <label class="field"><span>API キー（この端末にのみ保存）</span><input class="input" id="ai-key" type="password" value="${esc(st.geminiKey || '')}" placeholder="AIza..."></label>
-        <label class="field"><span>モデル名</span><input class="input" id="ai-model" value="${esc(st.geminiModel || DEFAULT_MODEL)}" placeholder="${DEFAULT_MODEL}"></label>
-        <p class="note">モデル名は <code>gemini-flash-latest</code>（常に最新の Flash）が既定です。エラーになる場合は <code>gemini-2.5-flash</code> などに変更してください。</p>
-        <div class="btn-row"><button class="btn primary" data-act="save-ai">保存</button><a class="btn" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">API キーを取得 ↗</a></div>
+        <h2>🤖 AI アシスタント</h2>
+        <p class="small muted">API キーはこの端末のブラウザ内にのみ保存され、選んだ AI の会社にだけ送信されます（利用料金は各社のアカウントに請求されます）。</p>
+        <label class="field"><span>使う AI</span>${aiProviderSelect('ai-provider', aiProvider())}</label>
+        ${Object.entries(AI_PROVIDERS).map(([k, P]) => `<div class="ai-conf" data-provider="${k}" ${k === aiProvider() ? '' : 'hidden'}>
+          ${k === 'openai' ? `<label class="field"><span>ベース URL</span><input class="input" id="ai-base-openai" value="${esc(st.openaiBase || '')}" placeholder="https://api.openai.com/v1"></label>` : ''}
+          <label class="field"><span>API キー</span><input class="input" id="ai-key-${k}" type="password" value="${esc(st[`${k}Key`] || '')}" placeholder="${esc(P.keyPlaceholder)}"></label>
+          <label class="field"><span>モデル名</span><input class="input" id="ai-model-${k}" value="${esc(st[`${k}Model`] || P.defaultModel)}" placeholder="${esc(P.defaultModel || '例: サービスのモデル ID')}"></label>
+          <p class="note">${P.modelNote}${P.keyUrl ? ` <a href="${P.keyUrl}" target="_blank" rel="noopener">${esc(P.keyUrlLabel)} ↗</a>` : ''}</p>
+        </div>`).join('')}
+        <div class="btn-row" style="margin-top:10px"><button class="btn primary" data-act="save-ai">保存</button></div>
       </section>
 
       <section class="card">
@@ -1086,6 +1334,7 @@ const ROUTES = [
   [/^\/songs$/, () => renderSongs(), 'songs'],
   [/^\/song\/(.+)$/, (m) => renderSong(decodeURIComponent(m[1])), 'songs'],
   [/^\/my$/, () => renderMy(), 'my'],
+  [/^\/gacha$/, () => renderGacha(), 'gacha'],
   [/^\/ai$/, () => renderAI(), 'ai'],
   [/^\/settings$/, () => renderSettings(), null],
 ];
@@ -1162,16 +1411,23 @@ const ACTIONS = {
   'save-key-inline': () => {
     const v = $('#ai-key-inline').value.trim();
     if (!v) return;
-    S.settings.geminiKey = v;
+    const p = $('#ai-provider-inline').value;
+    S.settings.aiProvider = p;
+    S.settings[`${p}Key`] = v;
     saveJSON(LS.settings, S.settings);
     toast('API キーを保存しました');
     rerender();
   },
   'save-ai': () => {
-    S.settings.geminiKey = $('#ai-key').value.trim();
-    S.settings.geminiModel = $('#ai-model').value.trim() || DEFAULT_MODEL;
+    const p = $('#ai-provider').value;
+    for (const k of Object.keys(AI_PROVIDERS)) {
+      S.settings[`${k}Key`] = $(`#ai-key-${k}`).value.trim();
+      S.settings[`${k}Model`] = $(`#ai-model-${k}`).value.trim() || AI_PROVIDERS[k].defaultModel;
+    }
+    S.settings.openaiBase = $('#ai-base-openai').value.trim();
+    S.settings.aiProvider = p;
     saveJSON(LS.settings, S.settings);
-    toast('保存しました');
+    toast(aiReady(p) ? `${AI_PROVIDERS[p].short} を使うように保存しました` : '保存しました（API キー・モデル名などが未入力です）');
   },
   'save-sync': async () => {
     const url = $('#gas-url').value.trim();
@@ -1219,6 +1475,30 @@ const ACTIONS = {
     rerender();
   },
   'export-csv': () => exportCSV(),
+  'gacha-mode': (el) => { S.ui.gachaMode = el.dataset.v; rerender(); },
+  'gacha-draw': (el) => {
+    const g = drawGacha({ mode: S.ui.gachaMode, count: S.ui.gachaCount, preferUnheard: !!S.ui.gachaUnheard });
+    S.ui.gacha = g;
+    const best = loadJSON(LS_GACHA_BEST, 0);
+    renderGachaResult();
+    if (g.score > best) saveJSON(LS_GACHA_BEST, g.score);
+    el.textContent = '🎰 もう一回！';
+    $('#gacha-result')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  },
+  'gacha-share': async () => {
+    const text = gachaText(S.ui.gacha);
+    try {
+      if (navigator.share) await navigator.share({ text });
+      else { await navigator.clipboard.writeText(text); toast('コピーしました'); }
+    } catch (e) {
+      if (e.name !== 'AbortError') { await navigator.clipboard.writeText(text).catch(() => {}); toast('コピーしました'); }
+    }
+  },
+  'gacha-ai': () => {
+    const text = `次のセットリストはガチャでランダムに作ったものです。もし実際のライブでこのセトリだったらどんなライブになりそうか、流れ・見どころ・レア曲のポイントを楽しく講評してください。\n\n${gachaText(S.ui.gacha)}`;
+    location.hash = '#/ai';
+    setTimeout(() => sendChat(text), 0);
+  },
   'reload-data': () => location.reload(),
 };
 
@@ -1236,12 +1516,16 @@ document.addEventListener('input', (ev) => {
   if (id === 'lives-q') { S.ui.livesQuery = ev.target.value; S.ui.livesLimit = 60; renderLivesList(); }
   else if (id === 'songs-q') { S.ui.songsQuery = ev.target.value; renderSongsList(); }
   else if (id === 'add-q') updateSuggest();
+  else if (id === 'gacha-count') { S.ui.gachaCount = Number(ev.target.value); $('#gacha-count-label').textContent = ev.target.value; }
 });
 
 document.addEventListener('change', (ev) => {
   const id = ev.target.id;
   if (id === 'lives-year') { S.ui.livesYear = ev.target.value; S.ui.livesLimit = 60; renderLivesList(); }
   else if (id === 'songs-sort') { S.ui.songsSort = ev.target.value; renderSongsList(); }
+  else if (id === 'gacha-unheard') { S.ui.gachaUnheard = ev.target.checked; }
+  else if (id === 'ai-provider') { document.querySelectorAll('.ai-conf').forEach((el) => { el.hidden = el.dataset.provider !== ev.target.value; }); }
+  else if (id === 'ai-provider-inline') { S.settings.aiProvider = ev.target.value; saveJSON(LS.settings, S.settings); rerender(); }
   else if (id === 'import-file' && ev.target.files[0]) {
     importFile(ev.target.files[0]).catch((e) => toast('読み込みに失敗しました: ' + e.message));
     ev.target.value = '';
