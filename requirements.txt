@@ -1,8 +1,2 @@
-streamlit
-pandas
-requests
-beautifulsoup4
-google-generativeai
-plotly
-gspread
-st-gsheets-connection
+requests>=2.31
+beautifulsoup4>=4.12
