@@ -201,7 +201,14 @@ a.row:hover { background: var(--accent-weak); text-decoration: none; }
 .datebox .md { font-size: .95rem; font-weight: 800; color: var(--accent); }
 .datebox.future { background: color-mix(in srgb, var(--yellow) 25%, var(--card)); }
 .datebox.future .md { color: color-mix(in srgb, var(--yellow) 45%, var(--text)); }
-.list-group-title { padding: 8px 14px; font-size: .78rem; font-weight: 800; color: var(--muted); background: color-mix(in srgb, var(--line) 45%, var(--card)); position: sticky; top: calc(var(--topbar-h) + env(safe-area-inset-top)); z-index: 1; }
+.list-group-title { padding: 8px 14px; font-size: .78rem; font-weight: 800; color: var(--muted); background: color-mix(in srgb, var(--line) 45%, var(--card)); }
+/* 年・月の見出しをスクロール中も画面上部に固定する。
+   カードの overflow: hidden があると sticky がカード内基準になり先頭の行に重なるため、
+   スクロールコンテナを作らない overflow: clip に対応したブラウザでのみ有効にする */
+@supports (overflow: clip) {
+  .card.flush { overflow: clip; }
+  .list-group-title { position: sticky; top: calc(var(--topbar-h) + env(safe-area-inset-top)); z-index: 1; }
+}
 
 .setlist { counter-reset: sl; list-style: none; margin: 0; padding: 0; }
 .setlist li { border-bottom: 1px solid var(--line); }

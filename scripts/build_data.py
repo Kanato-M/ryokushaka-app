@@ -92,7 +92,6 @@ def build() -> dict:
     lives_raw = read_csv(DATA_DIR / "LiveList.csv")
     setlists_raw = read_csv(DATA_DIR / "Setlists.csv")
     aliases_raw = read_csv(DATA_DIR / "song_aliases.csv")
-    mylive_raw = read_csv(DATA_DIR / "mylive.csv")
 
     # --- 楽曲 ---
     songs = []
@@ -176,15 +175,11 @@ def build() -> dict:
     for l in lives:
         l["hasSetlist"] = l["id"] in setlists
 
-    # --- マイ参戦記録の初期値（mylive.csv） ---
-    seed_my_lives = [r.get("表示名", "") for r in mylive_raw if r.get("表示名")]
-
     return {
         "generatedAt": datetime.now(JST).isoformat(timespec="seconds"),
         "songs": songs,
         "lives": lives,
         "setlists": setlists,
-        "seedMyLives": seed_my_lives,
         "stats": {
             "multiArtistFilteredEvents": len(filtered_events),
         },
